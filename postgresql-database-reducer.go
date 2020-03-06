@@ -6,10 +6,16 @@ import (
 	"fmt"
 	_ "github.com/lib/pq"
 	"log"
-	"sync"
 	"time"
 )
 
+type ForeignKeys struct {
+	ConstraintName    string
+	TableName         string
+	ColumnName        string
+	ForeignTableName  string
+	ForeignColumnName string
+}
 
 var tableCount = 0
 
@@ -20,8 +26,8 @@ func main() {
 	db := connectToDb(connectionString)
 
 	allTableNames := getAllTables(db)
-
-	Delete(*numberOfRowsToKeep, allTableNames, db)
+	allForeignKeys := getAllForeignKeys(db)
+	transactionDelete(*numberOfRowsToKeep, allTableNames, allForeignKeys, db)
 	fmt.Println("Overall time: ", time.Since(startTime))
 }
 
@@ -75,44 +81,89 @@ func getAllTables(db *sql.DB) []string {
 	return allTableNames
 }
 
-func Delete(numberOfRowsToKeep string, allTableNames []string, db *sql.DB) {
-	var wgDelete sync.WaitGroup
-
-	for _, tableName := range allTableNames {
-
-		wgDelete.Add(1)
-		go DeleteRows(tableName, numberOfRowsToKeep, db, &wgDelete)
+func getAllForeignKeys(db *sql.DB) map[string]ForeignKeys {
+	allForeignKeyRows, err := db.Query("SELECT tc.constraint_name, tc.table_name, kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name FROM information_schema.table_constraints AS tc JOIN information_schema.key_column_usage AS kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema JOIN information_schema.constraint_column_usage AS ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema WHERE tc.constraint_type = 'FOREIGN KEY'")
+	if err != nil {
+		fmt.Println(err)
 	}
-	wgDelete.Wait()
+
+	allForeignKeys := map[string]ForeignKeys{}
+	var foreignKeys ForeignKeys
+
+	for allForeignKeyRows.Next() {
+		err = allForeignKeyRows.Scan(
+			&foreignKeys.ConstraintName,
+			&foreignKeys.TableName,
+			&foreignKeys.ColumnName,
+			&foreignKeys.ForeignTableName,
+			&foreignKeys.ForeignColumnName)
+		if err != nil {
+			fmt.Println(err)
+		}
+		allForeignKeys[foreignKeys.ForeignTableName+foreignKeys.TableName] = foreignKeys
+	}
+	fmt.Println("Got all foreign keys")
+	return allForeignKeys
 }
 
-func DeleteRows(tableName string, numberOfRowsToKeep string, db *sql.DB, wgDelete *sync.WaitGroup) {
-	defer wgDelete.Done()
-
-	_, disableTriggerErr := db.Exec("ALTER TABLE " + tableName + " DISABLE TRIGGER ALL")
-	if disableTriggerErr != nil {
-		fmt.Println(disableTriggerErr)
-	}
-
-	result, deleteErr := db.Exec("DELETE FROM " + tableName + " WHERE ID NOT IN (SELECT id FROM " + tableName + " order by id LIMIT " + numberOfRowsToKeep + ")")
-	if deleteErr != nil {
-		fmt.Println(deleteErr)
+func CloseTransaction(tx *sql.Tx, commit *bool) {
+	if *commit {
+		log.Println("Commit sql transaction")
+		if err := tx.Commit(); err != nil {
+			log.Panic(err)
+		}
 	} else {
-		count, rowsAffectedErr := result.RowsAffected()
-		if rowsAffectedErr != nil {
-			fmt.Println(rowsAffectedErr)
-		} else {
-			log.Println("Deleted from: ", tableName ," deleted rows: ", count)
+		log.Println("Rollback sql transcation")
+		if err := tx.Rollback(); err != nil {
+			log.Panic(err)
 		}
 	}
-
-
-	_, enableTriggerErr := db.Exec("ALTER TABLE " + tableName + " ENABLE TRIGGER ALL")
-	if enableTriggerErr != nil {
-		fmt.Println(enableTriggerErr)
-	}
-
-	tableCount++
-	log.Println("Table number: ", tableCount, "Deleted:", tableName)
-
 }
+
+func transactionDelete(numberOfRowsToKeep string, allTableNames []string, allForeignKeys map[string]ForeignKeys, db *sql.DB) {
+	//tx, err := db.Begin()
+	//if err != nil {
+	//	return
+	//}
+	for _, tableName := range allTableNames {
+		for _, foreignTableName := range allTableNames {
+
+			tableForeignKeys := allForeignKeys[tableName + foreignTableName]
+			if tableForeignKeys.ConstraintName != "" {
+
+				log.Println(tableForeignKeys.ForeignColumnName)
+				log.Println(tableForeignKeys.ForeignTableName)
+				log.Println(tableForeignKeys.TableName)
+				log.Println(tableForeignKeys.ConstraintName)
+				log.Println(tableForeignKeys.ColumnName)
+				/*stmt, err := tx.Prepare("SET CONSTRAINTS"+ tableForeignKeys.ForeignColumnName +"DEFERRED") // some raw sql
+				if err != nil {
+						return
+				}
+				res, err := stmt.Exec() // some var args
+				if err != nil {
+					return
+				}*/
+			}
+		}
+	}
+	//commitTx := false
+	//defer CloseTransaction(tx, &commitTx)
+	//defer stmt.Close()
+	//
+	//// Second sql query
+	//stmt, err := tx.Prepare("DELETE FROM " + tableName + " USING "+ ForeignTableName +" WHERE ID NOT IN (SELECT id FROM " + tableName + " order by id LIMIT " + numberOfRowsToKeep + ")") // some raw sql
+	//if err != nil {
+	//	return
+	//}
+	//defer stmt.Close()
+	//
+	//res, err := stmt.Exec() // some var args
+	//if err != nil {
+	//	return
+	//}
+	//// success, commit and return result
+	//commitTx = true
+	//return
+}
+

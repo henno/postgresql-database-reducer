@@ -6,6 +6,7 @@ import (
 	"fmt"
 	_ "github.com/lib/pq"
 	"log"
+
 	"time"
 )
 
@@ -27,16 +28,17 @@ func main() {
 
 	allTableNames := getAllTables(db)
 	allForeignKeys := getAllForeignKeys(db)
+	//os.Exit(0)
 	transactionDelete(*numberOfRowsToKeep, allTableNames, allForeignKeys, db)
 	fmt.Println("Overall time: ", time.Since(startTime))
 }
 
 func parseFlags() (string, *string) {
-	host := flag.String("h", "127.0.0.1", "Host address")
+	host := flag.String("h", "localhost", "Host address")
 	port := flag.Int("p", 5432, "Database port to connect to")
 	user := flag.String("u", "postgres", "Database username")
-	password := flag.String("pw", "secret", "Database password")
-	dbname := flag.String("d", "database", "Database name")
+	password := flag.String("pw", "password", "Database password")
+	dbname := flag.String("d", "dbname", "Database name")
 	numberOfRowsToKeep := flag.String("r", "1000", "Number of rows to keep")
 	flag.Parse()
 	connectionString := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
@@ -48,12 +50,12 @@ func connectToDb(connectionString string) *sql.DB {
 
 	db, err := sql.Open("postgres", connectionString)
 	if err != nil {
-		fmt.Println(err)
+		log.Fatal(err)
 	}
 
 	err = db.Ping()
 	if err != nil {
-		fmt.Println(err)
+		log.Fatal(err)
 	}
 
 	fmt.Println("DB Connected")
@@ -125,17 +127,63 @@ func transactionDelete(numberOfRowsToKeep string, allTableNames []string, allFor
 	//if err != nil {
 	//	return
 	//}
+
+	copyOfAllTableNames := []string{}
+
+	for _, value := range allTableNames {
+		copyOfAllTableNames = append(copyOfAllTableNames, value)
+	}
+
 	for _, tableName := range allTableNames {
-		for _, foreignTableName := range allTableNames {
 
-			tableForeignKeys := allForeignKeys[tableName + foreignTableName]
+		log.Println("TableName: ", tableName)
+		for _, foreignTableName := range copyOfAllTableNames {
+
+			tableForeignKeys := allForeignKeys[foreignTableName+tableName]
+			//fmt.Println("LOOK HERE: ", tableForeignKeys)
 			if tableForeignKeys.ConstraintName != "" {
+				fmt.Println("TableName2: ", tableForeignKeys.TableName)
 
-				log.Println(tableForeignKeys.ForeignColumnName)
-				log.Println(tableForeignKeys.ForeignTableName)
-				log.Println(tableForeignKeys.TableName)
-				log.Println(tableForeignKeys.ConstraintName)
-				log.Println(tableForeignKeys.ColumnName)
+				//fmt.Println("ConstraintName: ", tableForeignKeys.ConstraintName)
+				//fmt.Println()
+				//log.Println("tableForeignKeys.ForeignColumnName: ",tableForeignKeys.ForeignColumnName)
+				//log.Println("tableForeignKeys.ForeignTableName: ", tableForeignKeys.ForeignTableName)
+				//log.Println("tableForeignKeys.ConstraintName: ",tableForeignKeys.ConstraintName)
+				//log.Println("tableForeignKeys.ColumnName: ",tableForeignKeys.ColumnName)
+				//fmt.Println("SELECTING ALL PROBLEMATIC ROWS: \n")
+
+				log.Println("SELECT * FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " ON " + tableForeignKeys.ForeignTableName + "." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND " + tableForeignKeys.ForeignTableName + "." + tableForeignKeys.ForeignColumnName + " IS NULL")
+				TableRows, err := db.Query("SELECT " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " AS FKTable ON FKTable." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND FKTable." + tableForeignKeys.ForeignColumnName + " IS NULL LIMIT 10")
+				if err != nil {
+					log.Fatal(err)
+				}
+
+				var idToBeDeleted string
+
+				for TableRows.Next() {
+
+					err = TableRows.Scan(&idToBeDeleted)
+
+					if err != nil {
+						panic(err.Error())
+					}
+
+					//tablerowsSLICE = append(tablerowsSLICE, count)
+
+					fmt.Println("DELETE FROM " + tableForeignKeys.TableName + " WHERE " + tableForeignKeys.ColumnName + " = " + idToBeDeleted)
+
+				}
+
+				//fmt.Println(tablerowsSLICE)
+
+				//for _, value := range tablerowsSLICE {
+				//	fmt.Println(value)
+				//}
+				//fmt.Println(tablerowsSLICE)
+
+				//SELECT * FROM Tablename left join foreignTableName on foreignTableName.foreigncolumnName = tablename.columnName WHERE tableName.columname IS NOT NULL AND foreignTableName.foreignColumnName IS NULL
+
+				//SELECT * FROM ? LEFT JOIN ? ON ?.? = ?.? WHERE ?.? IS NOT NULL AND ?.? IS NULL
 				/*stmt, err := tx.Prepare("SET CONSTRAINTS"+ tableForeignKeys.ForeignColumnName +"DEFERRED") // some raw sql
 				if err != nil {
 						return
@@ -144,7 +192,9 @@ func transactionDelete(numberOfRowsToKeep string, allTableNames []string, allFor
 				if err != nil {
 					return
 				}*/
+
 			}
+
 		}
 	}
 	//commitTx := false
@@ -166,4 +216,3 @@ func transactionDelete(numberOfRowsToKeep string, allTableNames []string, allFor
 	//commitTx = true
 	//return
 }
-

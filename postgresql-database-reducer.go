@@ -6,7 +6,8 @@ import (
 	"fmt"
 	_ "github.com/lib/pq"
 	"log"
-
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,7 +19,15 @@ type ForeignKeys struct {
 	ForeignColumnName string
 }
 
-var tableCount = 0
+type toDeleteStruct struct {
+	foreignTableName  string
+	foreignColumnName string
+	ColumnName        string
+	IDs               map[string]string
+}
+
+var deletedIDSCount = 0
+var deletedTablesCount = 0
 
 func main() {
 	startTime := time.Now()
@@ -28,8 +37,8 @@ func main() {
 
 	allTableNames := getAllTables(db)
 	allForeignKeys := getAllForeignKeys(db)
-	//os.Exit(0)
-	transactionDelete(*numberOfRowsToKeep, allTableNames, allForeignKeys, db)
+	DeleteNumberOfRows(*numberOfRowsToKeep, allTableNames, db)
+	FindAndDeleteOrphans(allTableNames, allForeignKeys, db)
 	fmt.Println("Overall time: ", time.Since(startTime))
 }
 
@@ -37,8 +46,8 @@ func parseFlags() (string, *string) {
 	host := flag.String("h", "localhost", "Host address")
 	port := flag.Int("p", 5432, "Database port to connect to")
 	user := flag.String("u", "postgres", "Database username")
-	password := flag.String("pw", "password", "Database password")
-	dbname := flag.String("d", "dbname", "Database name")
+	password := flag.String("pw", "", "Database password")
+	dbname := flag.String("d", "testdb", "Database name")
 	numberOfRowsToKeep := flag.String("r", "1000", "Number of rows to keep")
 	flag.Parse()
 	connectionString := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
@@ -108,52 +117,59 @@ func getAllForeignKeys(db *sql.DB) map[string]ForeignKeys {
 	return allForeignKeys
 }
 
-func CloseTransaction(tx *sql.Tx, commit *bool) {
-	if *commit {
-		log.Println("Commit sql transaction")
-		if err := tx.Commit(); err != nil {
-			log.Panic(err)
-		}
-	} else {
-		log.Println("Rollback sql transcation")
-		if err := tx.Rollback(); err != nil {
-			log.Panic(err)
-		}
+func DeleteNumberOfRows(numberOfRowsToKeep string, allTableNames []string, db *sql.DB) {
+	var wgDelete sync.WaitGroup
+
+	for _, tableName := range allTableNames {
+
+		wgDelete.Add(1)
+		go DelRowsFromDB(tableName, numberOfRowsToKeep, db, &wgDelete)
 	}
+	wgDelete.Wait()
 }
 
-func transactionDelete(numberOfRowsToKeep string, allTableNames []string, allForeignKeys map[string]ForeignKeys, db *sql.DB) {
-	//tx, err := db.Begin()
+// VAJA VEEL TUUNIDA
+func DelRowsFromDB(tableName string, numberOfRowsToKeep string, db *sql.DB, wgDelete *sync.WaitGroup) {
+	defer wgDelete.Done()
+
+	//_, err := db.Exec("ALTER TABLE " + tableName + " DISABLE TRIGGER ALL")
 	//if err != nil {
-	//	return
+	//	log.Fatal("err: ", err)
 	//}
+	//
+	//_, err1 := db.Exec("DELETE FROM " + tableName + " WHERE ID NOT IN (SELECT id FROM " + tableName + " order by id LIMIT " + numberOfRowsToKeep + ")")
+	//// Warn when table does not have an id field
+	//if err1 != nil {
+	//	log.Println("err1: ", err1, "tabelname: ", tableName)
+	//}
+	//_, err2 := db.Exec("ALTER TABLE " + tableName + " ENABLE TRIGGER ALL")
+	//if err2 != nil {
+	//	log.Fatal("err2: ",err2)
+	//}
+	//log.Println("DONE:", tableName)
+
+}
+
+func FindAndDeleteOrphans(allTableNames []string, allForeignKeys map[string]ForeignKeys, db *sql.DB) {
+
+	var toDeleteData = make(map[string]map[string]toDeleteStruct)
+
+	var found = 0
 
 	copyOfAllTableNames := []string{}
-
 	for _, value := range allTableNames {
 		copyOfAllTableNames = append(copyOfAllTableNames, value)
 	}
 
 	for _, tableName := range allTableNames {
-
-		log.Println("TableName: ", tableName)
 		for _, foreignTableName := range copyOfAllTableNames {
 
 			tableForeignKeys := allForeignKeys[foreignTableName+tableName]
-			//fmt.Println("LOOK HERE: ", tableForeignKeys)
+
 			if tableForeignKeys.ConstraintName != "" {
-				fmt.Println("TableName2: ", tableForeignKeys.TableName)
 
-				//fmt.Println("ConstraintName: ", tableForeignKeys.ConstraintName)
-				//fmt.Println()
-				//log.Println("tableForeignKeys.ForeignColumnName: ",tableForeignKeys.ForeignColumnName)
-				//log.Println("tableForeignKeys.ForeignTableName: ", tableForeignKeys.ForeignTableName)
-				//log.Println("tableForeignKeys.ConstraintName: ",tableForeignKeys.ConstraintName)
-				//log.Println("tableForeignKeys.ColumnName: ",tableForeignKeys.ColumnName)
-				//fmt.Println("SELECTING ALL PROBLEMATIC ROWS: \n")
+				TableRows, err := db.Query("SELECT " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " AS FKTable ON FKTable." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND FKTable." + tableForeignKeys.ForeignColumnName + " IS NULL")
 
-				log.Println("SELECT * FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " ON " + tableForeignKeys.ForeignTableName + "." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND " + tableForeignKeys.ForeignTableName + "." + tableForeignKeys.ForeignColumnName + " IS NULL")
-				TableRows, err := db.Query("SELECT " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " AS FKTable ON FKTable." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND FKTable." + tableForeignKeys.ForeignColumnName + " IS NULL LIMIT 10")
 				if err != nil {
 					log.Fatal(err)
 				}
@@ -168,51 +184,95 @@ func transactionDelete(numberOfRowsToKeep string, allTableNames []string, allFor
 						panic(err.Error())
 					}
 
-					//tablerowsSLICE = append(tablerowsSLICE, count)
+					//log.Println("SELECT " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " ON " + tableForeignKeys.ForeignTableName + "." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND " + tableForeignKeys.ForeignTableName + "." + tableForeignKeys.ForeignColumnName + " IS NULL")
+					//fmt.Println("DELETE FROM " + tableForeignKeys.TableName + " WHERE " + tableForeignKeys.ColumnName + " = " + idToBeDeleted)
+					found++
 
-					fmt.Println("DELETE FROM " + tableForeignKeys.TableName + " WHERE " + tableForeignKeys.ColumnName + " = " + idToBeDeleted)
+					if _, exists := toDeleteData[tableForeignKeys.TableName]; !exists {
+						toDeleteData[tableForeignKeys.TableName] = map[string]toDeleteStruct{}
+					}
 
+					if _, exists := toDeleteData[tableForeignKeys.TableName][tableForeignKeys.ConstraintName]; !exists {
+						toDeleteData[tableForeignKeys.TableName][tableForeignKeys.ConstraintName] = toDeleteStruct{
+							foreignTableName:  tableForeignKeys.ForeignTableName,
+							foreignColumnName: tableForeignKeys.ForeignColumnName,
+							ColumnName:        tableForeignKeys.ColumnName,
+							IDs:               map[string]string{},
+						}
+
+					}
+
+					toDeleteData[tableForeignKeys.TableName][tableForeignKeys.ConstraintName].IDs[idToBeDeleted] = idToBeDeleted
 				}
-
-				//fmt.Println(tablerowsSLICE)
-
-				//for _, value := range tablerowsSLICE {
-				//	fmt.Println(value)
-				//}
-				//fmt.Println(tablerowsSLICE)
-
-				//SELECT * FROM Tablename left join foreignTableName on foreignTableName.foreigncolumnName = tablename.columnName WHERE tableName.columname IS NOT NULL AND foreignTableName.foreignColumnName IS NULL
-
-				//SELECT * FROM ? LEFT JOIN ? ON ?.? = ?.? WHERE ?.? IS NOT NULL AND ?.? IS NULL
-				/*stmt, err := tx.Prepare("SET CONSTRAINTS"+ tableForeignKeys.ForeignColumnName +"DEFERRED") // some raw sql
-				if err != nil {
-						return
-				}
-				res, err := stmt.Exec() // some var args
-				if err != nil {
-					return
-				}*/
-
 			}
-
 		}
 	}
-	//commitTx := false
-	//defer CloseTransaction(tx, &commitTx)
-	//defer stmt.Close()
-	//
-	//// Second sql query
-	//stmt, err := tx.Prepare("DELETE FROM " + tableName + " USING "+ ForeignTableName +" WHERE ID NOT IN (SELECT id FROM " + tableName + " order by id LIMIT " + numberOfRowsToKeep + ")") // some raw sql
-	//if err != nil {
-	//	return
-	//}
-	//defer stmt.Close()
-	//
-	//res, err := stmt.Exec() // some var args
-	//if err != nil {
-	//	return
-	//}
-	//// success, commit and return result
-	//commitTx = true
-	//return
+
+	PrepareToDeleteOrphans(toDeleteData, db)
+	fmt.Println("\nFound Orphans: ", found)
+	fmt.Println("Tables count: ", deletedTablesCount)
+	fmt.Println("Deleted Ids count: ", deletedIDSCount)
+
+}
+
+//  PrepareToDeleteOrphans function
+func PrepareToDeleteOrphans(toDeleteData map[string]map[string]toDeleteStruct, db *sql.DB) {
+
+	for tabelname, valuemap := range toDeleteData {
+
+		var table string
+		var column string
+		var IDsSlice []string
+
+		table = tabelname
+
+		for _, toDeleteStructValues := range valuemap {
+
+			column = toDeleteStructValues.ColumnName
+
+			for _, ids := range toDeleteStructValues.IDs {
+				IDsSlice = append(IDsSlice, ids)
+			}
+		}
+
+		// Print delete arguments
+		fmt.Println("\ntable: ", table)
+		fmt.Println("column: ", column)
+		fmt.Println("ids: ", strings.Join(IDsSlice, ","))
+
+		deletedIDSCount += len(IDsSlice)
+
+		DeleteOrphans(table, column, strings.Join(IDsSlice, ","), db)
+	}
+
+}
+
+func DeleteOrphans(table string, column string, IDs string, db *sql.DB) {
+
+	_, err := db.Exec("ALTER TABLE " + table + " DISABLE TRIGGER ALL")
+	if err != nil {
+		log.Fatal("err: ", err)
+	}
+
+	result, err1 := db.Exec(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `)`)
+	log.Println(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `)`)
+	if err1 != nil {
+		fmt.Println("err1: ", err1)
+	}
+
+	AffectedRowsCount, err2 := result.RowsAffected()
+
+	if err2 != nil {
+		log.Fatal(err2.Error())
+	} else {
+		fmt.Printf("RowsAffected: " + fmt.Sprintf("%v", AffectedRowsCount))
+		fmt.Println()
+	}
+
+	_, err3 := db.Exec("ALTER TABLE " + table + " ENABLE TRIGGER ALL")
+	if err3 != nil {
+		log.Fatal("err2: ", err3)
+	}
+
+	deletedTablesCount++
 }

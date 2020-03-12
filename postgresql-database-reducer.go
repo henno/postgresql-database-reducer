@@ -27,19 +27,25 @@ type toDeleteStruct struct {
 }
 
 var deletedIDSCount = 0
-var deletedTablesCount = 0
+var Orphans = 0
+var RowsAffectedCount int64 = 0
 
 func main() {
 	startTime := time.Now()
+	fmt.Println("\n<-------------------- Start Time: ", startTime.Format("15:04:05 Monday (2006-01-02) -------------------->\n"))
 	connectionString, numberOfRowsToKeep := parseFlags()
 
 	db := connectToDb(connectionString)
-
 	allTableNames := getAllTables(db)
 	allForeignKeys := getAllForeignKeys(db)
+
 	DeleteNumberOfRows(*numberOfRowsToKeep, allTableNames, db)
 	FindAndDeleteOrphans(allTableNames, allForeignKeys, db)
-	fmt.Println("Overall time: ", time.Since(startTime))
+
+	fmt.Println("\n->Orphans:", Orphans)
+	fmt.Println("->Deleted IDs Count:", deletedIDSCount)
+	fmt.Println("->RowsAffected Count:", RowsAffectedCount)
+	fmt.Println("\n------> Overall time:", time.Since(startTime), "<------")
 }
 
 func parseFlags() (string, *string) {
@@ -67,7 +73,7 @@ func connectToDb(connectionString string) *sql.DB {
 		log.Fatal(err)
 	}
 
-	fmt.Println("DB Connected")
+	fmt.Println("--> DB Connected")
 	return db
 }
 
@@ -88,7 +94,7 @@ func getAllTables(db *sql.DB) []string {
 		allTableNames = append(allTableNames, tableName)
 
 	}
-	fmt.Println("Got all tables")
+	fmt.Println("--> Got all tables")
 	return allTableNames
 }
 
@@ -113,7 +119,7 @@ func getAllForeignKeys(db *sql.DB) map[string]ForeignKeys {
 		}
 		allForeignKeys[foreignKeys.ForeignTableName+foreignKeys.TableName] = foreignKeys
 	}
-	fmt.Println("Got all foreign keys")
+	fmt.Println("--> Got all foreign keys")
 	return allForeignKeys
 }
 
@@ -154,64 +160,78 @@ func FindAndDeleteOrphans(allTableNames []string, allForeignKeys map[string]Fore
 
 	var toDeleteData = make(map[string]map[string]toDeleteStruct)
 
-	var found = 0
-
 	copyOfAllTableNames := []string{}
+	var FindOrphans = true
+	var FoundOrphans = 0
+
 	for _, value := range allTableNames {
 		copyOfAllTableNames = append(copyOfAllTableNames, value)
 	}
 
-	for _, tableName := range allTableNames {
-		for _, foreignTableName := range copyOfAllTableNames {
+	Iterations := 1
 
-			tableForeignKeys := allForeignKeys[foreignTableName+tableName]
+	for FindOrphans {
+		for _, tableName := range allTableNames {
+			for _, foreignTableName := range copyOfAllTableNames {
 
-			if tableForeignKeys.ConstraintName != "" {
+				tableForeignKeys := allForeignKeys[foreignTableName+tableName]
 
-				TableRows, err := db.Query("SELECT " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " AS FKTable ON FKTable." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND FKTable." + tableForeignKeys.ForeignColumnName + " IS NULL")
+				if tableForeignKeys.ConstraintName != "" {
 
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				var idToBeDeleted string
-
-				for TableRows.Next() {
-
-					err = TableRows.Scan(&idToBeDeleted)
+					TableRows, err := db.Query("SELECT " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " AS FKTable ON FKTable." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND FKTable." + tableForeignKeys.ForeignColumnName + " IS NULL")
 
 					if err != nil {
-						panic(err.Error())
+						log.Fatal(err)
 					}
 
-					//log.Println("SELECT " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " ON " + tableForeignKeys.ForeignTableName + "." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND " + tableForeignKeys.ForeignTableName + "." + tableForeignKeys.ForeignColumnName + " IS NULL")
-					//fmt.Println("DELETE FROM " + tableForeignKeys.TableName + " WHERE " + tableForeignKeys.ColumnName + " = " + idToBeDeleted)
-					found++
+					var idToBeDeleted string
 
-					if _, exists := toDeleteData[tableForeignKeys.TableName]; !exists {
-						toDeleteData[tableForeignKeys.TableName] = map[string]toDeleteStruct{}
-					}
+					for TableRows.Next() {
 
-					if _, exists := toDeleteData[tableForeignKeys.TableName][tableForeignKeys.ConstraintName]; !exists {
-						toDeleteData[tableForeignKeys.TableName][tableForeignKeys.ConstraintName] = toDeleteStruct{
-							foreignTableName:  tableForeignKeys.ForeignTableName,
-							foreignColumnName: tableForeignKeys.ForeignColumnName,
-							ColumnName:        tableForeignKeys.ColumnName,
-							IDs:               map[string]string{},
+						err = TableRows.Scan(&idToBeDeleted)
+
+						if err != nil {
+							panic(err.Error())
 						}
 
-					}
+						FoundOrphans++
 
-					toDeleteData[tableForeignKeys.TableName][tableForeignKeys.ConstraintName].IDs[idToBeDeleted] = idToBeDeleted
+						if _, exists := toDeleteData[tableForeignKeys.TableName]; !exists {
+							toDeleteData[tableForeignKeys.TableName] = map[string]toDeleteStruct{}
+						}
+
+						if _, exists := toDeleteData[tableForeignKeys.TableName][tableForeignKeys.ConstraintName]; !exists {
+							toDeleteData[tableForeignKeys.TableName][tableForeignKeys.ConstraintName] = toDeleteStruct{
+								foreignTableName:  tableForeignKeys.ForeignTableName,
+								foreignColumnName: tableForeignKeys.ForeignColumnName,
+								ColumnName:        tableForeignKeys.ColumnName,
+								IDs:               map[string]string{},
+							}
+
+						}
+
+						toDeleteData[tableForeignKeys.TableName][tableForeignKeys.ConstraintName].IDs[idToBeDeleted] = idToBeDeleted
+					}
 				}
 			}
 		}
+
+		fmt.Println("\n------> Iteration:", Iterations)
+		fmt.Println("------> Orphans Found:", FoundOrphans)
+		if FoundOrphans != 0 {
+			FindOrphans = true
+			PrepareToDeleteOrphans(toDeleteData, db)
+			Orphans += FoundOrphans
+			FoundOrphans = 0
+			Iterations++
+		} else {
+			FindOrphans = false
+			fmt.Println("------> All Orphans Deleted <------")
+		}
+
 	}
 
-	PrepareToDeleteOrphans(toDeleteData, db)
-	fmt.Println("\nFound Orphans: ", found)
-	fmt.Println("Tables count: ", deletedTablesCount)
-	fmt.Println("Deleted Ids count: ", deletedIDSCount)
+	fmt.Println("\n-> Iterations Count:", Iterations)
 
 }
 
@@ -235,10 +255,11 @@ func PrepareToDeleteOrphans(toDeleteData map[string]map[string]toDeleteStruct, d
 			}
 		}
 
-		// Print delete arguments
-		fmt.Println("\ntable: ", table)
-		fmt.Println("column: ", column)
-		fmt.Println("ids: ", strings.Join(IDsSlice, ","))
+		// Print delete arguments (Tables with Orphans)
+
+		//fmt.Println("\ntable: ", table)
+		//fmt.Println("column: ", column)
+		//fmt.Println("ids: ", strings.Join(IDsSlice, ","))
 
 		deletedIDSCount += len(IDsSlice)
 
@@ -260,13 +281,12 @@ func DeleteOrphans(table string, column string, IDs string, db *sql.DB) {
 		fmt.Println("err1: ", err1)
 	}
 
-	AffectedRowsCount, err2 := result.RowsAffected()
+	RowsAffected, err2 := result.RowsAffected()
 
 	if err2 != nil {
 		log.Fatal(err2.Error())
 	} else {
-		fmt.Printf("RowsAffected: " + fmt.Sprintf("%v", AffectedRowsCount))
-		fmt.Println()
+		RowsAffectedCount += RowsAffected
 	}
 
 	_, err3 := db.Exec("ALTER TABLE " + table + " ENABLE TRIGGER ALL")
@@ -274,5 +294,4 @@ func DeleteOrphans(table string, column string, IDs string, db *sql.DB) {
 		log.Fatal("err2: ", err3)
 	}
 
-	deletedTablesCount++
 }

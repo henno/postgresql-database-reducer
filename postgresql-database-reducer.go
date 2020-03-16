@@ -6,8 +6,8 @@ import (
 	"fmt"
 	_ "github.com/lib/pq"
 	"log"
+	"os"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -28,37 +28,171 @@ type toDeleteStruct struct {
 
 var deletedIDSCount = 0
 var Orphans = 0
-var RowsAffectedCount int64 = 0
 
 func main() {
 	startTime := time.Now()
 	fmt.Println("\n<-------------------- Start Time: ", startTime.Format("15:04:05 Monday (2006-01-02) -------------------->\n"))
-	connectionString, numberOfRowsToKeep := parseFlags()
 
-	db := connectToDb(connectionString)
-	allTableNames := getAllTables(db)
-	allForeignKeys := getAllForeignKeys(db)
+	ProgramStart()
 
-	DeleteNumberOfRows(*numberOfRowsToKeep, allTableNames, db)
-	FindAndDeleteOrphans(allTableNames, allForeignKeys, db)
-
-	fmt.Println("\n->Orphans:", Orphans)
-	fmt.Println("->Deleted IDs Count:", deletedIDSCount)
-	fmt.Println("->RowsAffected Count:", RowsAffectedCount)
 	fmt.Println("\n------> Overall time:", time.Since(startTime), "<------")
 }
 
-func parseFlags() (string, *string) {
+func ProgramStart() {
+
+	connectionString := PrintCurrentDb()
+
+	fmt.Print("\nDo you want to enter new Host? (Type 'yes' Or Press Enter if No): ")
+
+	var err error
+	var Ask string
+
+	_, err = fmt.Scanln(&Ask)
+	if err != nil {
+		if strings.Contains(err.Error(), "unexpected newline") {
+			fmt.Println("\n-----------------------> Enter Table name, Primary key and Number of Rows to Delete <-----------------------")
+		}
+	} else {
+		fmt.Println("Error: ", err)
+	}
+
+	if Ask == "yes" || Ask == "y" {
+		Host, Port, User, Password, DbName := GetHostInfo()
+		connectionString = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", Host, Port, User, Password, DbName)
+	}
+
+	db := connectToDb(connectionString)
+
+	TableName, PrimaryKey, NumberRowsToDelete := GetTableInfo()
+
+	DelRowsFromDB(TableName, PrimaryKey, NumberRowsToDelete, db)
+
+}
+
+func PrintCurrentDb() string {
+
+	FlagHost, FlagPort, FlagUser, FlagPassword, FlagDbName := parseFlags()
+
+	fmt.Println("-----------------------> Current Database Host <-----------------------")
+	fmt.Println("\nHost: ", fmt.Sprintf("%s", *FlagHost))
+	fmt.Println("Port: ", fmt.Sprintf("%d", *FlagPort))
+	fmt.Println("User: ", fmt.Sprintf("%s", *FlagUser))
+	fmt.Println("Password: ", fmt.Sprintf("%s", *FlagPassword))
+	fmt.Println("Database Name: ", fmt.Sprintf("%s", *FlagDbName))
+
+	connectionString := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", *FlagHost, *FlagPort, *FlagUser, *FlagPassword, *FlagDbName)
+
+	return connectionString
+}
+
+func GetTableInfo() (string, string, string) {
+	var err error
+	var TableName string
+	var PrimaryKey string
+	var NumberRowsToDelete string
+
+	fmt.Print("Table Name: ")
+	_, err = fmt.Scanln(&TableName)
+	if err != nil {
+		if strings.Contains(err.Error(), "unexpected newline") {
+			fmt.Println("No Table Name")
+			os.Exit(1)
+		} else {
+			fmt.Println("Error: ", err)
+		}
+
+	}
+
+	fmt.Print("Primary key: ")
+	_, err = fmt.Scanln(&PrimaryKey)
+	if err != nil {
+		if strings.Contains(err.Error(), "unexpected newline") {
+			fmt.Println("No Primary key")
+			os.Exit(1)
+		} else {
+			fmt.Println("Error: ", err)
+		}
+
+	}
+
+	fmt.Print("Rows to Delete: ")
+	_, err = fmt.Scanln(&NumberRowsToDelete)
+	if err != nil {
+		if strings.Contains(err.Error(), "unexpected newline") {
+			fmt.Println("No Rows")
+			os.Exit(1)
+		} else {
+			fmt.Println("Error: ", err)
+		}
+
+	}
+
+	return TableName, PrimaryKey, NumberRowsToDelete
+}
+
+func GetHostInfo() (string, int, string, string, string) {
+
+	var err error
+	var Host string
+	var Port int
+	var User string
+	var Password string
+	var DbName string
+
+	fmt.Print("Host: ")
+	_, err = fmt.Scanln(&Host)
+	if err != nil {
+		fmt.Println("Error: ", err)
+	} else {
+		fmt.Println("&", Host)
+	}
+
+	fmt.Print("Port: ")
+	_, err = fmt.Scanln(&Port)
+	if err != nil {
+		fmt.Println("Error: ", err)
+	} else {
+		fmt.Println("&", Port)
+	}
+
+	fmt.Print("User: ")
+	_, err = fmt.Scanln(&User)
+	if err != nil {
+		fmt.Println("Error: ", err)
+	} else {
+		fmt.Println("&", User)
+	}
+
+	fmt.Print("Password: ")
+	_, err = fmt.Scanln(&Password)
+	if err != nil {
+		fmt.Println("Error: ", err)
+	} else {
+		fmt.Println("&", Password)
+	}
+
+	fmt.Print("Database Name: ")
+	_, err = fmt.Scanln(&DbName)
+	if err != nil {
+		fmt.Println("Error: ", err)
+	} else {
+		fmt.Println("&", DbName)
+	}
+
+	return Host, Port, User, Password, DbName
+}
+
+func parseFlags() (*string, *int, *string, *string, *string) {
 	host := flag.String("h", "localhost", "Host address")
 	port := flag.Int("p", 5432, "Database port to connect to")
 	user := flag.String("u", "postgres", "Database username")
-	password := flag.String("pw", "", "Database password")
+	password := flag.String("pw", "asd123", "Database password")
 	dbname := flag.String("d", "testdb", "Database name")
-	numberOfRowsToKeep := flag.String("r", "1000", "Number of rows to keep")
+	//numberOfRowsToKeep := flag.String("r", "1000", "Number of rows to keep")
 	flag.Parse()
-	connectionString := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-		*host, *port, *user, *password, *dbname)
-	return connectionString, numberOfRowsToKeep
+	//connectionString := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+	//	*host, *port, *user, *password, *dbname)
+	return host, port, user, password, dbname
 }
 
 func connectToDb(connectionString string) *sql.DB {
@@ -123,36 +257,40 @@ func getAllForeignKeys(db *sql.DB) map[string]ForeignKeys {
 	return allForeignKeys
 }
 
-func DeleteNumberOfRows(numberOfRowsToKeep string, allTableNames []string, db *sql.DB) {
-	var wgDelete sync.WaitGroup
+func DelRowsFromDB(TableName string, PrimaryKey string, NumberRowsToDelete string, db *sql.DB) {
 
-	for _, tableName := range allTableNames {
+	var err error
+	var result sql.Result
 
-		wgDelete.Add(1)
-		go DelRowsFromDB(tableName, numberOfRowsToKeep, db, &wgDelete)
+	fmt.Println()
+
+	log.Println("ALTER TABLE " + TableName + " DISABLE TRIGGER ALL;")
+	_, err = db.Exec("ALTER TABLE " + TableName + " DISABLE TRIGGER ALL;")
+	if err != nil {
+		log.Fatal(err.Error())
 	}
-	wgDelete.Wait()
-}
 
-// VAJA VEEL TUUNIDA
-func DelRowsFromDB(tableName string, numberOfRowsToKeep string, db *sql.DB, wgDelete *sync.WaitGroup) {
-	defer wgDelete.Done()
+	log.Println("DELETE FROM " + TableName + " WHERE " + PrimaryKey + " = any (array(SELECT " + PrimaryKey + " FROM " + TableName + " ORDER BY " + PrimaryKey + " LIMIT " + NumberRowsToDelete + "));")
+	result, err = db.Exec("DELETE FROM " + TableName + " WHERE " + PrimaryKey + " = any (array(SELECT " + PrimaryKey + " FROM " + TableName + " ORDER BY " + PrimaryKey + " LIMIT " + NumberRowsToDelete + "));")
 
-	//_, err := db.Exec("ALTER TABLE " + tableName + " DISABLE TRIGGER ALL")
-	//if err != nil {
-	//	log.Fatal("err: ", err)
-	//}
-	//
-	//_, err1 := db.Exec("DELETE FROM " + tableName + " WHERE ID NOT IN (SELECT id FROM " + tableName + " order by id LIMIT " + numberOfRowsToKeep + ")")
-	//// Warn when table does not have an id field
-	//if err1 != nil {
-	//	log.Println("err1: ", err1, "tabelname: ", tableName)
-	//}
-	//_, err2 := db.Exec("ALTER TABLE " + tableName + " ENABLE TRIGGER ALL")
-	//if err2 != nil {
-	//	log.Fatal("err2: ",err2)
-	//}
-	//log.Println("DONE:", tableName)
+	if err != nil {
+		log.Fatal(err.Error())
+	} else {
+		RowsAffected1, err := result.RowsAffected()
+
+		if err != nil {
+			log.Fatal(err.Error())
+		} else {
+			log.Println("RowsAffected:", fmt.Sprintf("%v", RowsAffected1))
+		}
+	}
+
+	log.Println("ALTER TABLE " + TableName + " ENABLE TRIGGER ALL;")
+	_, err = db.Exec("ALTER TABLE " + TableName + " ENABLE TRIGGER ALL;")
+	if err != nil {
+		log.Fatal(err.Error())
+	}
+	fmt.Println("-----> DONE")
 
 }
 
@@ -219,7 +357,6 @@ func FindAndDeleteOrphans(allTableNames []string, allForeignKeys map[string]Fore
 		fmt.Println("\n------> Iteration:", Iterations)
 		fmt.Println("------> Orphans Found:", FoundOrphans)
 		if FoundOrphans != 0 {
-			FindOrphans = true
 			PrepareToDeleteOrphans(toDeleteData, db)
 			Orphans += FoundOrphans
 			FoundOrphans = 0
@@ -270,26 +407,27 @@ func PrepareToDeleteOrphans(toDeleteData map[string]map[string]toDeleteStruct, d
 
 func DeleteOrphans(table string, column string, IDs string, db *sql.DB) {
 
-	_, err := db.Exec("ALTER TABLE " + table + " DISABLE TRIGGER ALL")
+	_, err := db.Exec("ALTER TABLE " + table + " DISABLE TRIGGER ALL;")
 	if err != nil {
 		log.Fatal("err: ", err)
 	}
 
-	result, err1 := db.Exec(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `)`)
+	result2, err1 := db.Exec(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `);`)
 	log.Println(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `)`)
 	if err1 != nil {
 		fmt.Println("err1: ", err1)
 	}
 
-	RowsAffected, err2 := result.RowsAffected()
+	RowsAffected2, err2 := result2.RowsAffected()
 
 	if err2 != nil {
 		log.Fatal(err2.Error())
 	} else {
-		RowsAffectedCount += RowsAffected
+		fmt.Println("RowsAffected:", fmt.Sprintf("%v", RowsAffected2))
+
 	}
 
-	_, err3 := db.Exec("ALTER TABLE " + table + " ENABLE TRIGGER ALL")
+	_, err3 := db.Exec("ALTER TABLE " + table + " ENABLE TRIGGER ALL;")
 	if err3 != nil {
 		log.Fatal("err2: ", err3)
 	}

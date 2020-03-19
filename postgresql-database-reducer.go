@@ -7,6 +7,7 @@ import (
 	_ "github.com/lib/pq"
 	"log"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +33,7 @@ var FoundOrphans = 0
 var Iterations = 1
 var FindOrphans = true
 var toDeleteData = make(map[string]map[string]toDeleteStruct)
-var OutOfMemoryTables = make(map[string]map[string]string)
+var OutOfMemoryTables = make(map[string]map[string][]string)
 var AllRowsAffected int64 = 0
 
 var DefaultHost = "localhost"
@@ -44,7 +45,7 @@ var AskNewDB = false
 
 func main() {
 	startTime := time.Now()
-	fmt.Println("\n<-------------------- Start Time: ", startTime.Format("15:04:05 Monday (2006-01-02) -------------------->\n"))
+	fmt.Println("\n<-------------------- Start Time: ", startTime.Format("15:04:05 Monday (2006-01-02) -------------------->"))
 
 	ProgramStart()
 
@@ -84,7 +85,6 @@ func ProgramStart() {
 }
 
 func StartRemovingOrphans(db *sql.DB) {
-	fmt.Print(" -> Starting to Remove Orphans")
 	AllTableNames := getAllTables(db)
 	AllFK := getAllForeignKeys(db)
 	FindAndDeleteOrphans(AllTableNames, AllFK, db)
@@ -100,12 +100,14 @@ func PrintCurrentDb() string {
 
 	FlagHost, FlagPort, FlagUser, FlagPassword, FlagDbName := parseFlags()
 
-	fmt.Println("--> Current Database")
-	fmt.Println("\n -> Host: ", fmt.Sprintf("%s", *FlagHost))
-	fmt.Println(" -> Port: ", fmt.Sprintf("%d", *FlagPort))
-	fmt.Println(" -> User: ", fmt.Sprintf("%s", *FlagUser))
-	fmt.Println(" -> Password: ", fmt.Sprintf("%s", *FlagPassword))
-	fmt.Println(" -> Database Name: ", fmt.Sprintf("%s", *FlagDbName))
+	if AskNewDB {
+		fmt.Println("\n--> Current Database")
+		fmt.Println("\n -> Host: ", fmt.Sprintf("%s", *FlagHost))
+		fmt.Println(" -> Port: ", fmt.Sprintf("%d", *FlagPort))
+		fmt.Println(" -> User: ", fmt.Sprintf("%s", *FlagUser))
+		fmt.Println(" -> Password: ", fmt.Sprintf("%s", *FlagPassword))
+		fmt.Println(" -> Database Name: ", fmt.Sprintf("%s", *FlagDbName))
+	}
 
 	connectionString := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", *FlagHost, *FlagPort, *FlagUser, *FlagPassword, *FlagDbName)
 
@@ -282,7 +284,7 @@ func getAllForeignKeys(db *sql.DB) map[string]ForeignKeys {
 		}
 		allForeignKeys[foreignKeys.ForeignTableName+foreignKeys.TableName] = foreignKeys
 	}
-	fmt.Println(" -> Got all foreign keys")
+	fmt.Print(" -> Got all foreign keys")
 	return allForeignKeys
 }
 
@@ -331,7 +333,7 @@ func MakeCopyOfSlice(slice []string) []string {
 
 func FindAndDeleteOrphans(allTableNames []string, allForeignKeys map[string]ForeignKeys, db *sql.DB) {
 
-	fmt.Print("\n-> Searching Orphans")
+	fmt.Print(" -> Searching Orphans")
 
 	copyOfAllTableNames := MakeCopyOfSlice(allTableNames)
 
@@ -358,12 +360,13 @@ func IterateOrphans(db *sql.DB) {
 
 	var wgWait sync.WaitGroup
 
-	fmt.Printf("\n\n-> (%d) -> Orphans Found %d", Iterations, FoundOrphans)
+	Tables := reflect.ValueOf(toDeleteData).MapKeys()
 
+	fmt.Printf("\n\n-> Iteration (%d) -> Orphans Found %d -> Tables %d -> %v\n", Iterations, FoundOrphans, len(Tables), Tables)
+	//fmt.Printf(" -> Tables %d -> (%s) -> \n", len(Order), strings.Join(Order, ", "))
 	if FoundOrphans != 0 {
 		wgWait.Add(1)
 		PrepareToDeleteOrphans(toDeleteData, db, &wgWait)
-		// Siin peaks olema Out of memory tabelite kustutamine
 		wgWait.Wait()
 		Orphans += FoundOrphans
 		FoundOrphans = 0
@@ -373,13 +376,65 @@ func IterateOrphans(db *sql.DB) {
 		FindOrphans = false
 		fmt.Println(" -> Done!")
 	}
+
 }
 
-func SearchOrphans(FKTableName string, FKColumnName string, FKForeignTableName string, FKForeignColumnName string, FKConstraitName string, db *sql.DB) {
-	//log.Println("SELECT " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " AS FKTable ON FKTable." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND FKTable." + tableForeignKeys.ForeignColumnName + " IS NULL")
-	//TableRows, err := db.Query("SELECT " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " FROM " + tableForeignKeys.TableName + " LEFT JOIN " + tableForeignKeys.ForeignTableName + " AS FKTable ON FKTable." + tableForeignKeys.ForeignColumnName + " = " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " WHERE " + tableForeignKeys.TableName + "." + tableForeignKeys.ColumnName + " IS NOT NULL AND FKTable." + tableForeignKeys.ForeignColumnName + " IS NULL")
+func DeleteOutOfMemoryTables(OutOfMemoryTables map[string]map[string][]string, db *sql.DB, wgDelMemoryTables *sync.WaitGroup) {
 
-	//log.Println("SELECT " + FKTableName + "." + FKColumnName + " FROM " + FKTableName + " LEFT JOIN " + FKForeignTableName + " AS FKTable ON FKTable." + FKForeignColumnName + " = " + FKTableName + "." + FKColumnName + " WHERE " + FKTableName + "." + FKColumnName + " IS NOT NULL AND FKTable." + FKForeignColumnName + " IS NULL")
+	wgDelMemoryTables.Done()
+
+	var wgDelete1 sync.WaitGroup
+
+	var err error
+	var result sql.Result
+
+	fmt.Println("DeleteOutOfMemory start")
+
+	for TableName, value := range OutOfMemoryTables {
+		var table string
+		var column string
+		var IDsSlice []string
+		//fmt.Print(" -> table: ", TableName)
+		table = TableName
+		for ColumnName, IDs := range value {
+			//fmt.Print(" -> Column: ", ColumnName)
+			//fmt.Print(" -> ids: ", IDs)
+			column = ColumnName
+			IDsSlice = IDs
+
+		}
+		_, err = db.Exec("ALTER TABLE " + table + " DISABLE TRIGGER ALL;")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		//log.Println(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `);`)
+		IDs := strings.Join(IDsSlice, ",")
+		result, err = db.Exec(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `);`)
+		if err != nil {
+			if strings.Contains(err.Error(), "out of memory") {
+				fmt.Printf("| Out of Memory (%s, %d) |", table, len(IDsSlice))
+			} else {
+				fmt.Print(err)
+			}
+		} else {
+			RowsAffected, _ := result.RowsAffected()
+			AllRowsAffected += RowsAffected
+			fmt.Printf("| %s (IDs: %d, RowsAffected: %s) |", table, len(IDs), fmt.Sprintf("%v", RowsAffected))
+		}
+
+		_, err = db.Exec("ALTER TABLE " + table + " ENABLE TRIGGER ALL;")
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	wgDelete1.Wait()
+
+}
+
+func SearchOrphans(FKTableName string, FKColumnName string, FKForeignTableName string, FKForeignColumnName string, FKConstraintName string, db *sql.DB) {
+
 	TableRows, err := db.Query("SELECT " + FKTableName + "." + FKColumnName + " FROM " + FKTableName + " LEFT JOIN " + FKForeignTableName + " AS FKTable ON FKTable." + FKForeignColumnName + " = " + FKTableName + "." + FKColumnName + " WHERE " + FKTableName + "." + FKColumnName + " IS NOT NULL AND FKTable." + FKForeignColumnName + " IS NULL")
 
 	if err != nil {
@@ -402,8 +457,8 @@ func SearchOrphans(FKTableName string, FKColumnName string, FKForeignTableName s
 			toDeleteData[FKTableName] = map[string]toDeleteStruct{}
 		}
 
-		if _, exists := toDeleteData[FKTableName][FKConstraitName]; !exists {
-			toDeleteData[FKTableName][FKConstraitName] = toDeleteStruct{
+		if _, exists := toDeleteData[FKTableName][FKConstraintName]; !exists {
+			toDeleteData[FKTableName][FKConstraintName] = toDeleteStruct{
 				foreignTableName:  FKForeignTableName,
 				foreignColumnName: FKForeignColumnName,
 				ColumnName:        FKColumnName,
@@ -412,7 +467,7 @@ func SearchOrphans(FKTableName string, FKColumnName string, FKForeignTableName s
 
 		}
 
-		toDeleteData[FKTableName][FKConstraitName].IDs[idToBeDeleted] = idToBeDeleted
+		toDeleteData[FKTableName][FKConstraintName].IDs[idToBeDeleted] = idToBeDeleted
 	}
 }
 
@@ -421,39 +476,66 @@ func PrepareToDeleteOrphans(toDeleteData map[string]map[string]toDeleteStruct, d
 	wgWait.Done()
 
 	var wgDelete sync.WaitGroup
-	var Order []string
 
-	for tabelname, valuemap := range toDeleteData {
+	for TableName, ValueMap := range toDeleteData {
 
 		var table string
 		var column string
 		var IDsSlice []string
 
-		table = tabelname
+		table = TableName
 
-		for _, toDeleteStructValues := range valuemap {
+		for _, toDeleteStructValues := range ValueMap {
 
 			column = toDeleteStructValues.ColumnName
 
-			for _, ids := range toDeleteStructValues.IDs {
-				IDsSlice = append(IDsSlice, ids)
+			for _, IDs := range toDeleteStructValues.IDs {
+				IDsSlice = append(IDsSlice, IDs)
 			}
 		}
 
-		wgDelete.Add(1)
-		Order = append(Order, table)
-		go DeleteOrphans(table, column, strings.Join(IDsSlice, ","), db, &wgDelete)
+		if len(IDsSlice) >= 1000000 {
+
+			var NewIDsSlice []string
+			var RememberTable = table
+			var RememberColumn = column
+			var IDsCount = 500000
+
+			size := len(IDsSlice)
+			diff := size % IDsCount
+			i := (size - diff) - IDsCount
+			iterate := true
+
+			for iterate {
+
+				if i == 0 {
+					iterate = false
+				} else {
+					i -= IDsCount
+					size -= IDsCount
+
+					NewIDsSlice = IDsSlice[i:size]
+					wgDelete.Add(1)
+					go DeleteOrphans(RememberTable, RememberColumn, NewIDsSlice, db, &wgDelete)
+				}
+
+			}
+
+		} else {
+			wgDelete.Add(1)
+			go DeleteOrphans(table, column, IDsSlice, db, &wgDelete)
+		}
+
 	}
 
-	fmt.Printf(" -> Tables %d -> (%s) -> \n", len(Order), strings.Join(Order, ", "))
 	wgDelete.Wait()
 
 }
 
-func DeleteOrphans(table string, column string, IDs string, db *sql.DB, wgDelete *sync.WaitGroup) {
+func DeleteOrphans(table string, column string, IDsSlice []string, db *sql.DB, wgDelete *sync.WaitGroup) {
 
 	wgDelete.Done()
-
+	IDs := strings.Join(IDsSlice, ",")
 	var err error
 	var result sql.Result
 
@@ -466,8 +548,10 @@ func DeleteOrphans(table string, column string, IDs string, db *sql.DB, wgDelete
 	result, err = db.Exec(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `);`)
 	if err != nil {
 		if strings.Contains(err.Error(), "out of memory") {
-			fmt.Printf(" Out of Memory, (%s)", table)
-			OutOfMemoryTables[table][column] = IDs
+			fmt.Printf("| Out of Memory (%s, %d) |", table, len(IDsSlice))
+			//OutOfMemoryTables[table] = map[string][]string{}
+			//OutOfMemoryTables[table][column] = []string{}
+			//OutOfMemoryTables[table][column] = IDsSlice
 		} else {
 			fmt.Print(err)
 		}

@@ -33,8 +33,11 @@ var FoundOrphans = 0
 var Iterations = 1
 var FindOrphans = true
 var toDeleteData = make(map[string]map[string]toDeleteStruct)
-var OutOfMemoryTables = make(map[string]map[string][]string)
 var AllRowsAffected int64 = 0
+
+var IDsLimit = 100000
+var AvailableConnections = 90
+var maxConnections = 90
 
 var DefaultHost = "localhost"
 var DefaultPort = 5432
@@ -346,9 +349,7 @@ func FindAndDeleteOrphans(allTableNames []string, allForeignKeys map[string]Fore
 				}
 			}
 		}
-
 		IterateOrphans(db)
-
 	}
 
 	fmt.Println("\n-> Iterations:", Iterations-1)
@@ -363,7 +364,7 @@ func IterateOrphans(db *sql.DB) {
 	Tables := reflect.ValueOf(toDeleteData).MapKeys()
 
 	fmt.Printf("\n\n-> Iteration (%d) -> Orphans Found %d -> Tables %d -> %v\n", Iterations, FoundOrphans, len(Tables), Tables)
-	//fmt.Printf(" -> Tables %d -> (%s) -> \n", len(Order), strings.Join(Order, ", "))
+
 	if FoundOrphans != 0 {
 		wgWait.Add(1)
 		PrepareToDeleteOrphans(toDeleteData, db, &wgWait)
@@ -374,68 +375,18 @@ func IterateOrphans(db *sql.DB) {
 		Iterations++
 	} else {
 		FindOrphans = false
-		fmt.Println(" -> Done!")
 	}
-
-}
-
-func DeleteOutOfMemoryTables(OutOfMemoryTables map[string]map[string][]string, db *sql.DB, wgDelMemoryTables *sync.WaitGroup) {
-
-	wgDelMemoryTables.Done()
-
-	var wgDelete1 sync.WaitGroup
-
-	var err error
-	var result sql.Result
-
-	fmt.Println("DeleteOutOfMemory start")
-
-	for TableName, value := range OutOfMemoryTables {
-		var table string
-		var column string
-		var IDsSlice []string
-		//fmt.Print(" -> table: ", TableName)
-		table = TableName
-		for ColumnName, IDs := range value {
-			//fmt.Print(" -> Column: ", ColumnName)
-			//fmt.Print(" -> ids: ", IDs)
-			column = ColumnName
-			IDsSlice = IDs
-
-		}
-		_, err = db.Exec("ALTER TABLE " + table + " DISABLE TRIGGER ALL;")
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		//log.Println(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `);`)
-		IDs := strings.Join(IDsSlice, ",")
-		result, err = db.Exec(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `);`)
-		if err != nil {
-			if strings.Contains(err.Error(), "out of memory") {
-				fmt.Printf("| Out of Memory (%s, %d) |", table, len(IDsSlice))
-			} else {
-				fmt.Print(err)
-			}
-		} else {
-			RowsAffected, _ := result.RowsAffected()
-			AllRowsAffected += RowsAffected
-			fmt.Printf("| %s (IDs: %d, RowsAffected: %s) |", table, len(IDs), fmt.Sprintf("%v", RowsAffected))
-		}
-
-		_, err = db.Exec("ALTER TABLE " + table + " ENABLE TRIGGER ALL;")
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-
-	wgDelete1.Wait()
 
 }
 
 func SearchOrphans(FKTableName string, FKColumnName string, FKForeignTableName string, FKForeignColumnName string, FKConstraintName string, db *sql.DB) {
 
-	TableRows, err := db.Query("SELECT " + FKTableName + "." + FKColumnName + " FROM " + FKTableName + " LEFT JOIN " + FKForeignTableName + " AS FKTable ON FKTable." + FKForeignColumnName + " = " + FKTableName + "." + FKColumnName + " WHERE " + FKTableName + "." + FKColumnName + " IS NOT NULL AND FKTable." + FKForeignColumnName + " IS NULL")
+	TableRows, err := db.Query("SELECT " + FKTableName + "." +
+		FKColumnName + " FROM " + FKTableName +
+		" LEFT JOIN " + FKForeignTableName + " AS FKTable ON FKTable." +
+		FKForeignColumnName + " = " + FKTableName + "." + FKColumnName +
+		" WHERE " + FKTableName + "." + FKColumnName +
+		" IS NOT NULL AND FKTable." + FKForeignColumnName + " IS NULL")
 
 	if err != nil {
 		log.Fatal(err)
@@ -475,7 +426,7 @@ func PrepareToDeleteOrphans(toDeleteData map[string]map[string]toDeleteStruct, d
 
 	wgWait.Done()
 
-	var wgDelete sync.WaitGroup
+	var wgDeleteOrphans sync.WaitGroup
 
 	for TableName, ValueMap := range toDeleteData {
 
@@ -494,76 +445,139 @@ func PrepareToDeleteOrphans(toDeleteData map[string]map[string]toDeleteStruct, d
 			}
 		}
 
-		if len(IDsSlice) >= 1000000 {
-
-			var NewIDsSlice []string
-			var RememberTable = table
-			var RememberColumn = column
-			var IDsCount = 500000
-
-			size := len(IDsSlice)
-			diff := size % IDsCount
-			i := (size - diff) - IDsCount
-			iterate := true
-
-			for iterate {
-
-				if i == 0 {
-					iterate = false
-				} else {
-					i -= IDsCount
-					size -= IDsCount
-
-					NewIDsSlice = IDsSlice[i:size]
-					wgDelete.Add(1)
-					go DeleteOrphans(RememberTable, RememberColumn, NewIDsSlice, db, &wgDelete)
-				}
-
-			}
-
+		if len(IDsSlice) >= IDsLimit {
+			CutSliceAndDelete(IDsSlice, table, column, IDsLimit, db)
 		} else {
-			wgDelete.Add(1)
-			go DeleteOrphans(table, column, IDsSlice, db, &wgDelete)
+			wgDeleteOrphans.Add(1)
+			go DeleteOrphans(table, column, IDsSlice, db, &wgDeleteOrphans)
 		}
 
 	}
 
-	wgDelete.Wait()
+	wgDeleteOrphans.Wait()
 
 }
 
-func DeleteOrphans(table string, column string, IDsSlice []string, db *sql.DB, wgDelete *sync.WaitGroup) {
+func CutSliceAndDelete(IDsSlice []string, table string, column string, IDsLimit int, db *sql.DB) {
 
-	wgDelete.Done()
-	IDs := strings.Join(IDsSlice, ",")
-	var err error
-	var result sql.Result
+	var NewIDsSlice []string
+	var OrderMapSize = 0
 
-	_, err = db.Exec("ALTER TABLE " + table + " DISABLE TRIGGER ALL;")
+	limit := IDsLimit / 2
+	size := len(IDsSlice)
+	diff := size % limit
+	i := (size - diff) - limit
+	iterate := true
+
+	var OrderMap = make(map[int][]string)
+
+	for iterate {
+		if i == 0 {
+			iterate = false
+		} else {
+			i -= limit
+			size -= limit
+			NewIDsSlice = IDsSlice[i:size]
+
+			if _, exists := OrderMap[OrderMapSize]; !exists {
+				OrderMap[OrderMapSize] = []string{}
+			}
+
+			OrderMap[OrderMapSize] = NewIDsSlice
+			OrderMapSize++
+		}
+	}
+
+	fmt.Printf("\nTable: %s, OrderMapSize: %d, size: %d, oneSlice: %d\n", table, OrderMapSize, size, size/OrderMapSize)
+
+	LimitConnectionDelete(table, column, OrderMap, OrderMapSize, db)
+
+}
+
+func LimitConnectionDelete(table string, column string, OrderMap map[int][]string, OrderMapSize int, db *sql.DB) {
+
+	var wgDeleteByOne sync.WaitGroup
+
+	OpenTable(table, db)
+
+	connect := true
+	connections := 0
+	// Order map on tyhi! WIP
+	for batchCounter := 0; batchCounter < OrderMapSize; batchCounter++ {
+		if batchCounter%maxConnections == 0 {
+			for connect {
+				if connections == maxConnections {
+					connect = false
+				} else {
+					wgDeleteByOne.Add(1)
+					go FasterDeleteByTable(table, column, OrderMap[connections], db, &wgDeleteByOne)
+					connections++
+				}
+			}
+			wgDeleteByOne.Wait()
+		}
+	}
+
+	SlicesLeft := OrderMapSize - connections
+
+	for i := 0; i < SlicesLeft; i++ {
+		wgDeleteByOne.Add(1)
+		go FasterDeleteByTable(table, column, OrderMap[connections], db, &wgDeleteByOne)
+		connections++
+	}
+
+	wgDeleteByOne.Wait()
+
+	CloseTable(table, db)
+
+}
+
+func FasterDeleteByTable(RememberTable string, RememberColumn string, NewIDsSlice []string, db *sql.DB, wgDeleteByOne *sync.WaitGroup) {
+
+	wgDeleteByOne.Done()
+	DeleteFromTable(RememberTable, RememberColumn, NewIDsSlice, db)
+}
+
+func OpenTable(table string, db *sql.DB) {
+
+	_, err := db.Exec("ALTER TABLE " + table + " DISABLE TRIGGER ALL;")
 	if err != nil {
 		log.Fatal(err)
 	}
+}
 
-	//log.Println(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `);`)
-	result, err = db.Exec(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `);`)
+func CloseTable(table string, db *sql.DB) {
+
+	_, err := db.Exec("ALTER TABLE " + table + " ENABLE TRIGGER ALL;")
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func DeleteFromTable(table string, column string, IDsSlice []string, db *sql.DB) {
+
+	IDs := strings.Join(IDsSlice, ",")
+
+	result, err := db.Exec(`DELETE FROM ` + table + ` WHERE ` + column + ` IN (` + IDs + `)`)
 	if err != nil {
 		if strings.Contains(err.Error(), "out of memory") {
 			fmt.Printf("| Out of Memory (%s, %d) |", table, len(IDsSlice))
-			//OutOfMemoryTables[table] = map[string][]string{}
-			//OutOfMemoryTables[table][column] = []string{}
-			//OutOfMemoryTables[table][column] = IDsSlice
 		} else {
-			fmt.Print(err)
+			fmt.Printf("| %v |", err)
 		}
 	} else {
 		RowsAffected, _ := result.RowsAffected()
 		AllRowsAffected += RowsAffected
-		fmt.Printf("| %s (IDs: %d, RowsAffected: %s) |", table, len(IDs), fmt.Sprintf("%v", RowsAffected))
-	}
+		fmt.Printf("| %s (IDs: %d, RowsAffected: %s) |", table, len(IDsSlice), fmt.Sprintf("%v", RowsAffected))
 
-	_, err = db.Exec("ALTER TABLE " + table + " ENABLE TRIGGER ALL;")
-	if err != nil {
-		log.Fatal(err)
 	}
+}
 
+func DeleteOrphans(table string, column string, IDsSlice []string, db *sql.DB, wgDeleteOrphans *sync.WaitGroup) {
+
+	wgDeleteOrphans.Done()
+
+	OpenTable(table, db)
+	DeleteFromTable(table, column, IDsSlice, db)
+	CloseTable(table, db)
 }

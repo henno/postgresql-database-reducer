@@ -35,7 +35,7 @@ var FindOrphans = true
 var toDeleteData = make(map[string]map[string]toDeleteStruct)
 var AllRowsAffected int64 = 0
 
-var IDsLimit = 100000
+var IDsLimit = 1000
 var AvailableConnections = 90
 var maxConnections = 90
 
@@ -502,6 +502,12 @@ func LimitConnectionDelete(table string, column string, OrderMap map[int][]strin
 
 	connect := true
 	connections := 0
+	var indexToDelete []string
+	for _, connections := range OrderMap {
+		//fmt.Println(connections, "=>", element)
+		indexToDelete = connections
+	}
+
 	// Order map on tyhi! WIP
 	for batchCounter := 0; batchCounter < OrderMapSize; batchCounter++ {
 		if batchCounter%maxConnections == 0 {
@@ -509,8 +515,9 @@ func LimitConnectionDelete(table string, column string, OrderMap map[int][]strin
 				if connections == maxConnections {
 					connect = false
 				} else {
+
 					wgDeleteByOne.Add(1)
-					go FasterDeleteByTable(table, column, OrderMap[connections], db, &wgDeleteByOne)
+					FasterDeleteByTable(table, column, indexToDelete, db, &wgDeleteByOne)
 					connections++
 				}
 			}
@@ -521,8 +528,10 @@ func LimitConnectionDelete(table string, column string, OrderMap map[int][]strin
 	SlicesLeft := OrderMapSize - connections
 
 	for i := 0; i < SlicesLeft; i++ {
+
 		wgDeleteByOne.Add(1)
-		go FasterDeleteByTable(table, column, OrderMap[connections], db, &wgDeleteByOne)
+		FasterDeleteByTable(table, column, indexToDelete, db, &wgDeleteByOne)
+
 		connections++
 	}
 
